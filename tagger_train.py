@@ -27,10 +27,10 @@ SPECIAL_KEYS = {
 }
 
 
-WINDOW_LEN = 5
+WINDOW_LEN = 3
 BATCH_SIZE = 20
-RANDOM_WORD_SUB=0.05
-RANDOM_CHAR_SUB=0.01
+RANDOM_WORD_SUB=0.1
+RANDOM_CHAR_SUB=0.1
 EPOCHS = 3
 LEARNING_RATE = 0.01
 
@@ -74,6 +74,9 @@ def add_key_to_dict(key, key_to_idx, idx_to_key):
         idx_to_key[idx] = key
 
 def dataset_to_dictionary(dataset, scpecial_keys=None):
+    """
+    Retrieve all necessary dictionaries from the dataset
+    """
     word_to_idx = {}
     idx_to_word = {}
     
@@ -109,6 +112,9 @@ def dataset_to_dictionary(dataset, scpecial_keys=None):
     return word_to_idx, tag_to_idx, char_to_idx, idx_to_word, idx_to_tag, idx_to_char
 
 def pad_sequence(sequence, pad_key, required_len):
+    """
+    Add pad_key in the end of sequence to reach required_len
+    """
     pad_len = required_len - len(sequence)
     return sequence + [pad_key]*pad_len
     
@@ -125,9 +131,13 @@ def prepare_sequence(sequence,
         dictionary (dict): mapping from key to integer
         absent_key (str): key which will substitute absent keys in sequence.
                             if None, absent keys will be ignored
-        random_sub (bool): flag which indicatesthe need to randomly change keys in sequence 
-                            with absent key with some chance (10% maybe)
+        pad_key (str): key which will added in the end of the sequense.
+                            if None, no padding will be done.
+        required_len (int): len to which the sequence must be padded.
+        random_sub (bool): flag which indicates the need to randomly change keys in sequence 
+                            with absent_key with random_chance.
                             if None, random substitution will not be used.
+        random_chance (float): the chance of element being substituted with absent_key.
     Returns:
         list of transformed sequence
     """
@@ -297,15 +307,38 @@ class BatchedDataset:
 
 class FinalModel(nn.Module):
     def __init__(self, char_emb_dim, word_emb_dim, hidden_dim, vocab_size, charset_size, tagset_size, window, l):
+        """
+        Model that performs tagger task
+        Args:
+            char_emb_dim (int): The length of charcter-level embeddings
+            word_emb_dim (int): The length of word-level embeddings
+            hidden_dim (int): The output dimention of the LSTM layer
+            vocab_size (int): The number of words in the vocabulaty
+            charset_size (int): The number of characters
+            tagset_size (int): The number of taggs
+            window (int): The size of the filter in character-level conv1D layer
+            l (int): The number of filters in character-level conv1D layer
+        """
         super(FinalModel, self).__init__()
         self.char_embeddings = nn.Embedding(charset_size, char_emb_dim)
         self.word_embeddings = nn.Embedding(vocab_size, word_emb_dim)
         self.conv1 = nn.Conv1d(char_emb_dim, l, window, padding=(window-1)//2)
         self.relu = nn.ReLU()
-        self.lstm = nn.LSTM(word_emb_dim+l, hidden_dim, bidirectional=True)
+        self.lstm = nn.LSTM(word_emb_dim+l, hidden_dim, bidirectional=True, batch_first=True)
         self.hidden2tag = nn.Linear(hidden_dim*2, tagset_size)
 
     def forward(self, batch_sentence, batch_words):
+        """
+        Inference tag scores for each word
+        Args:
+            batch_sentence: Tensor with codded words of shape [B, S]
+            batch_words: Tensor with codded chars of shape [B*S, W]
+
+            Here:
+                B - batch size
+                S - max number of words in all sentences in this batch
+                W - mux number of chars in words in all sentences in this batch
+        """
         # Pass each window through CNN, max_pool the results for each word
         
         B, S = batch_sentence.shape
@@ -367,46 +400,52 @@ def train_model(train_file, model_file):
                     random_word_sub=RANDOM_WORD_SUB,
                     random_char_sub=RANDOM_CHAR_SUB)
 
-    model = FinalModel(char_emb_dim=10, 
-                        word_emb_dim=100, 
-                        hidden_dim=16, 
+    model = FinalModel(char_emb_dim=40, 
+                        word_emb_dim=50, 
+                        hidden_dim=90, 
                         vocab_size=len(word_to_idx), 
                         charset_size=len(char_to_idx),
                         tagset_size=len(tag_to_idx),
                         window=WINDOW_LEN,
-                        l=20)
+                        l=40)
 
     loss_function = nn.NLLLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     losses = []
 
     print("Training...")
-    for epoch in range(EPOCHS):
-        for step in range(len(bds)):
-            model.zero_grad()
+    
+    try:
+        for epoch in range(EPOCHS):
+            for step in range(len(bds)):
+                model.zero_grad()
 
-            # Get batch
-            sentences, words, taggs, mask = bds[step]
+                # Get batch
+                sentences, words, taggs, mask = bds[step]
 
-            # Pass batch to model and get output
-            tag_scores = model(sentences, words)
+                # Pass batch to model and get output
+                tag_scores = model(sentences, words)
 
-            B, S, T = tag_scores.shape
-            
-            # Reshape output and input to appropriate to loss dims
-            mask = mask.reshape(-1)
-            tag_scores= tag_scores.reshape((B*S,T))
-            tag_scores = tag_scores * mask.unsqueeze(1)
-            taggs = taggs.reshape(-1) * mask
-            
-            # Calculate loss learn model
-            loss = loss_function(tag_scores, taggs)
-            losses.append(loss.item())
-            loss.backward()
-            optimizer.step()
-            if step % 500 == 0:
-                print(f"\tStep {step}/{len(bds)},loss = {losses[-1]}")
-        print(f"Epoch {epoch}/{EPOCHS}: loss={losses[-1]}")
+                B, S, T = tag_scores.shape
+                
+                # Reshape output and input to appropriate loss dims
+                mask = mask.reshape(-1)
+                tag_scores= tag_scores.reshape((B*S,T))
+
+                # Mask the padded elements
+                tag_scores = tag_scores * mask.unsqueeze(1)
+                taggs = taggs.reshape(-1) * mask
+                
+                # Calculate loss learn model
+                loss = loss_function(tag_scores, taggs)
+                losses.append(loss.item())
+                loss.backward()
+                optimizer.step()
+                if step % 500 == 0:
+                    print(f"\tStep {step}/{len(bds)},loss = {losses[-1]}")
+            print(f"Epoch {epoch+1}/{EPOCHS}: loss={losses[-1]}")
+    except KeyboardInterrupt:
+        pass
 
 
     model_data = {

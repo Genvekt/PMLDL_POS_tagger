@@ -10,15 +10,38 @@ import pickle
 
 class FinalModel(nn.Module):
     def __init__(self, char_emb_dim, word_emb_dim, hidden_dim, vocab_size, charset_size, tagset_size, window, l):
+        """
+        Model that performs tagger task
+        Args:
+            char_emb_dim (int): The length of charcter-level embeddings
+            word_emb_dim (int): The length of word-level embeddings
+            hidden_dim (int): The output dimention of the LSTM layer
+            vocab_size (int): The number of words in the vocabulaty
+            charset_size (int): The number of characters
+            tagset_size (int): The number of taggs
+            window (int): The size of the filter in character-level conv1D layer
+            l (int): The number of filters in character-level conv1D layer
+        """
         super(FinalModel, self).__init__()
         self.char_embeddings = nn.Embedding(charset_size, char_emb_dim)
         self.word_embeddings = nn.Embedding(vocab_size, word_emb_dim)
         self.conv1 = nn.Conv1d(char_emb_dim, l, window, padding=(window-1)//2)
         self.relu = nn.ReLU()
-        self.lstm = nn.LSTM(word_emb_dim+l, hidden_dim, bidirectional=True)
+        self.lstm = nn.LSTM(word_emb_dim+l, hidden_dim, bidirectional=True, batch_first=True)
         self.hidden2tag = nn.Linear(hidden_dim*2, tagset_size)
 
     def forward(self, batch_sentence, batch_words):
+        """
+        Inference tag scores for each word
+        Args:
+            batch_sentence: Tensor with codded words of shape [B, S]
+            batch_words: Tensor with codded chars of shape [B*S, W]
+
+            Here:
+                B - batch size
+                S - max number of words in all sentences in this batch
+                W - mux number of chars in words in all sentences in this batch
+        """
         # Pass each window through CNN, max_pool the results for each word
         
         B, S = batch_sentence.shape
@@ -29,6 +52,8 @@ class FinalModel(nn.Module):
         # [B*S, c_emb, W]
         chars_batch = chars_batch.permute(0,2,1)
         
+        ## Apply 1D convolutuon
+
         # [B*S, l, W]
         conv_out = self.conv1(chars_batch)
         conv_out = self.relu(conv_out)
@@ -41,9 +66,13 @@ class FinalModel(nn.Module):
         
         # [B, S, w_emb]
         word_embeds = self.word_embeddings(batch_sentence)
+
+        ## Concat words embeddings and words represented in chars
         
         # [B, S, w_emb+l]
         concated = torch.cat((word_embeds, cnn_word_vecs), dim=2)
+
+        ## Apply LSTM
         
         # [B, S, hidden]
         lstm_out, _ = self.lstm(concated)
@@ -51,7 +80,7 @@ class FinalModel(nn.Module):
         # [B, S, T]
         tag_space = self.hidden2tag(lstm_out)
         tag_scores = F.log_softmax(tag_space, dim=2)
-        return tag_scores  
+        return tag_scores      
 
 def read_dataset(file_path, labeled=True):
     """
@@ -123,9 +152,7 @@ def prepare_sequence(sequence,
 
 
 def tag_sentence(test_file, model_file, out_file):
-    # write your code here. You can add functions as well.
-    # use torch library to load model_file
-    
+
     with open(model_file, "rb") as f:
         model_data = pickle.load(f)
 
