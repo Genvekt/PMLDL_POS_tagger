@@ -11,6 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+# Pairs of words and keys which will be used to replace absent in dictionary words
+# and padd sentences or words inside batch.
 SPECIAL_KEYS = {
     "absent": {
         "word": "ABS",
@@ -30,6 +32,7 @@ BATCH_SIZE = 20
 RANDOM_WORD_SUB=0.05
 RANDOM_CHAR_SUB=0.01
 EPOCHS = 3
+LEARNING_RATE = 0.01
 
 def read_dataset(file_path, labeled=True):
     """
@@ -212,12 +215,14 @@ class BatchedDataset:
         return sort_func
     
     def create_batch(self, items):
-        # max_s
+        # Calculate maximum length of sentences in a batch
+        # depends wether data is labeled or not
         if self.labeled:
             max_sentence_len = max([len(item[0]) for item in items])
         else:
             max_sentence_len = max([len(item) for item in items])
-        # max_w
+
+        # Calculate maximum length of words in a batch
         max_word_len = self.find_max_word_len(items)
 
         batch_sentences = []
@@ -311,6 +316,8 @@ class FinalModel(nn.Module):
         # [B*S, c_emb, W]
         chars_batch = chars_batch.permute(0,2,1)
         
+        ## Apply 1D convolutuon
+
         # [B*S, l, W]
         conv_out = self.conv1(chars_batch)
         conv_out = self.relu(conv_out)
@@ -323,9 +330,13 @@ class FinalModel(nn.Module):
         
         # [B, S, w_emb]
         word_embeds = self.word_embeddings(batch_sentence)
+
+        ## Concat words embeddings and words represented in chars
         
         # [B, S, w_emb+l]
         concated = torch.cat((word_embeds, cnn_word_vecs), dim=2)
+
+        ## Apply LSTM
         
         # [B, S, hidden]
         lstm_out, _ = self.lstm(concated)
@@ -337,12 +348,17 @@ class FinalModel(nn.Module):
 
 
 def train_model(train_file, model_file):
-    # write your code here. You can add functions as well.
-    # use torch library to save model parameters, hyperparameters, etc. to model_file
+    """
+    Train model on the data and save weights, hyperparameters and dictionaries.
+    Args:
+        train_file (str): absolute path to train data file.
+        model_file (str): absolute path where the model and dictionaries will be saved.
+    """
 
     print("Reading data...")
     train_dataset = read_dataset(train_file, labeled=True)
 
+    # Create dictionaries from train dataset
     word_to_idx, tag_to_idx, char_to_idx, idx_to_word, idx_to_tag, idx_to_char = dataset_to_dictionary(train_dataset, 
                                                                                                        scpecial_keys=SPECIAL_KEYS)
     print("Batching data... (Might take about 1 min)")                                                                                                   
@@ -361,7 +377,7 @@ def train_model(train_file, model_file):
                         l=20)
 
     loss_function = nn.NLLLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     losses = []
 
     print("Training...")
@@ -369,16 +385,21 @@ def train_model(train_file, model_file):
         for step in range(len(bds)):
             model.zero_grad()
 
+            # Get batch
             sentences, words, taggs, mask = bds[step]
 
+            # Pass batch to model and get output
             tag_scores = model(sentences, words)
+
             B, S, T = tag_scores.shape
-            # tag_scores = torch.argmax(tag_scores, dim=1) #.reshape(-1)
+            
+            # Reshape output and input to appropriate to loss dims
             mask = mask.reshape(-1)
             tag_scores= tag_scores.reshape((B*S,T))
             tag_scores = tag_scores * mask.unsqueeze(1)
             taggs = taggs.reshape(-1) * mask
-
+            
+            # Calculate loss learn model
             loss = loss_function(tag_scores, taggs)
             losses.append(loss.item())
             loss.backward()
